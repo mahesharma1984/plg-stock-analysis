@@ -1,0 +1,58 @@
+# RALPH Whale Tracker Configuration
+# Token: Ralph Wiggum ($RALPH) on Solana
+
+token:
+  address: "CxWPdDBqxVo3fnTMRTvNuSrd4gkp78udSrFvkVDBAGS"
+  symbol: "RALPH"
+  decimals: 6
+  total_supply: 1000000000  # 1 billion tokens
+
+wallets:
+  - label: "whale_1"
+    address: "B93svZLmpNPdpBrNa6r1BbJphj2E7hTDx4fAfnHbKMUj"
+    notes: "Top holder ~9.33%"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_2"
+    address: "5tFsLPyhWGJRdnHzTqKZWJfpnvMV4yHvmYqPaVRvJL5h"
+    notes: "#2 holder ~4.58%"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_3"
+    address: "HLnpSzBvqJVxT2FmZBmqyHJ8dZB2oiQ31iM2k3Jxq3Yv"
+    notes: "#3 holder ~4.20%"
+    alert_threshold_pct: 1.0
+
+  - label: "liquidity_pool"
+    address: "DbyK8gEiXwNeh2zFW2Lo1svuQ1WkHAeQyNDsRaKQ6BHf"
+    notes: "Meteora primary pool"
+    alert_threshold_pct: 10.0
+    is_pool: true
+
+cex_wallets:
+  - label: "binance"
+    address: "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9"
+  - label: "coinbase"
+    address: "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS"
+  - label: "kraken"
+    address: "kraken_address_placeholder"
+  - label: "okx"
+    address: "okx_address_placeholder"
+  - label: "bybit"
+    address: "bybit_address_placeholder"
+
+settings:
+  poll_interval_seconds: 60
+  log_file: "ralph_tracker.log"
+  state_file: "ralph_tracker_state.json"
+  rpc_url: "https://api.mainnet-beta.solana.com"
+  rpc_backup_urls:
+    - "https://solana-mainnet.g.alchemy.com/v2/demo"
+    - "https://rpc.ankr.com/solana"
+  max_retries: 3
+  retry_delay_seconds: 2
+  request_timeout_seconds: 30
+
+# API Keys (set via environment variables or .env file)
+# SOLSCAN_API_KEY=your_key_here
+# BIRDEYE_API_KEY=your_key_here
