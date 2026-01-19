@@ -8,6 +8,15 @@ Token: Ralph Wiggum ($RALPH)
 Contract: CxWPdDBqxVo3fnTMRTvNuSrd4gkp78udSrFvkVDBAGS
 Chain: Solana
 DEX: Meteora
+
+Features:
+- Real-time whale wallet monitoring
+- Buy/sell signal detection
+- CEX transfer alerts
+- Multi-day trend analysis
+- Holder count tracking
+- Liquidity depth monitoring
+- Trend confidence scoring
 """
 
 import argparse
@@ -30,6 +39,13 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 from rich import box
+
+# Trend analysis module
+try:
+    from ralph_trend_analysis import TrendTracker, TrendScore, TrendSignal
+    TREND_ANALYSIS_AVAILABLE = True
+except ImportError:
+    TREND_ANALYSIS_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -727,6 +743,7 @@ class RalphWhaleTracker:
 
     def __init__(self, config_path: str = "ralph_config.yaml"):
         self.config = load_config(config_path)
+        self.config_path = config_path
         self.rpc = SolanaRPCClient(self.config)
         self.formatter = CLIFormatter(self.config.token_decimals)
         self.logger = TrackerLogger(self.config.log_file)
@@ -738,6 +755,15 @@ class RalphWhaleTracker:
         # Load or initialize wallet states
         self.wallet_states = load_state(self.config.state_file)
         self._initialize_wallet_states()
+
+        # Initialize trend tracker if available
+        self.trend_tracker = None
+        if TREND_ANALYSIS_AVAILABLE:
+            try:
+                self.trend_tracker = TrendTracker(config_path)
+                console.print("[dim]Trend analysis enabled[/dim]")
+            except Exception as e:
+                console.print(f"[yellow]Trend analysis unavailable: {e}[/yellow]")
 
     def _initialize_wallet_states(self):
         """Initialize wallet states from config."""
@@ -827,15 +853,20 @@ class RalphWhaleTracker:
         self.formatter.print_snapshot_table(self.wallet_states)
         save_state(self.wallet_states, self.config.state_file)
 
-    def run_polling(self):
+    def run_polling(self, record_trends: bool = True):
         """Run continuous polling loop."""
         self.formatter.print_header(
             len(self.wallet_states),
             self.config.poll_interval
         )
 
+        poll_count = 0
+        trend_record_interval = 5  # Record trend data every N polls
+
         try:
             while True:
+                poll_count += 1
+
                 # Fetch current balances
                 new_balances = self.fetch_balances()
 
@@ -852,6 +883,11 @@ class RalphWhaleTracker:
                 for signal in signals:
                     self.formatter.print_signal(signal)
 
+                # Record trend data periodically
+                if record_trends and poll_count % trend_record_interval == 0:
+                    self.record_trend_data()
+                    self.show_quick_trend()
+
                 console.print("-" * 60)
 
                 # Wait for next poll
@@ -859,6 +895,9 @@ class RalphWhaleTracker:
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Tracker stopped by user.[/yellow]")
+            # Final trend data recording
+            if record_trends:
+                self.record_trend_data()
             save_state(self.wallet_states, self.config.state_file)
 
     def show_history(self, hours: int = 24):
@@ -889,6 +928,123 @@ class RalphWhaleTracker:
         save_state(self.wallet_states, self.config.state_file)
         console.print(f"[green]Added wallet: {label} ({address})[/green]")
 
+    def run_trend_analysis(self):
+        """Run full trend analysis and display report."""
+        if not self.trend_tracker:
+            console.print("[red]Trend analysis not available. Check ralph_trend_analysis.py[/red]")
+            return None
+
+        # Make sure we have current balances
+        console.print("[cyan]Fetching current wallet balances...[/cyan]")
+        balances = self.fetch_balances()
+
+        # Update states
+        for addr, balance in balances.items():
+            if addr in self.wallet_states:
+                ws = self.wallet_states[addr]
+                ws.balance_ralph = balance
+                ws.pct_supply = (balance / (10 ** self.config.token_decimals)) / self.config.total_supply * 100
+
+        save_state(self.wallet_states, self.config.state_file)
+
+        # Run trend analysis
+        return self.trend_tracker.show_trend_report(self.wallet_states)
+
+    def record_trend_data(self):
+        """Record current state to trend database (called during polling)."""
+        if not self.trend_tracker:
+            return
+
+        try:
+            # Record wallet snapshots
+            self.trend_tracker.record_snapshot(self.wallet_states)
+
+            # Record liquidity for pool wallets
+            for addr, ws in self.wallet_states.items():
+                if ws.is_pool:
+                    self.trend_tracker.record_liquidity(addr, ws.balance_ralph)
+
+        except Exception as e:
+            console.print(f"[dim]Trend recording error: {e}[/dim]")
+
+    def show_trend_history(self, days: int = 7):
+        """Show historical trend scores."""
+        if not self.trend_tracker:
+            console.print("[red]Trend analysis not available.[/red]")
+            return
+
+        scores = self.trend_tracker.get_trend_history(days)
+
+        if not scores:
+            console.print("[yellow]No trend history available yet.[/yellow]")
+            console.print("[dim]Run trend analysis or polling to build history.[/dim]")
+            return
+
+        console.print()
+        console.print(Panel.fit(
+            f"[bold]Trend Score History ({days} days)[/bold]\n"
+            f"Showing {len(scores)} recorded scores",
+            border_style="blue"
+        ))
+        console.print()
+
+        table = Table(box=box.SIMPLE)
+        table.add_column("Timestamp", style="dim")
+        table.add_column("Signal", justify="center")
+        table.add_column("Score", justify="right")
+        table.add_column("Confidence", justify="right")
+        table.add_column("Whale Phase", justify="center")
+
+        SIGNAL_COLORS = {
+            "STRONG_BULLISH": "green bold",
+            "BULLISH": "green",
+            "NEUTRAL": "yellow",
+            "BEARISH": "red",
+            "STRONG_BEARISH": "red bold",
+        }
+
+        PHASE_COLORS = {
+            "ACCUMULATION": "green",
+            "DISTRIBUTION": "red",
+            "CONSOLIDATION": "yellow",
+            "UNKNOWN": "dim",
+        }
+
+        for score in scores[:20]:  # Show last 20
+            signal_color = SIGNAL_COLORS.get(score.signal.value, "white")
+            phase_color = PHASE_COLORS.get(score.whale_phase.value, "white")
+
+            table.add_row(
+                score.timestamp[:16],
+                f"[{signal_color}]{score.signal.value}[/{signal_color}]",
+                f"{score.score:+d}",
+                f"{score.confidence*100:.0f}%",
+                f"[{phase_color}]{score.whale_phase.value}[/{phase_color}]"
+            )
+
+        console.print(table)
+        console.print()
+
+    def show_quick_trend(self):
+        """Show quick trend summary without full analysis."""
+        if not self.trend_tracker:
+            console.print("[dim]Trend analysis not available[/dim]")
+            return
+
+        scores = self.trend_tracker.get_trend_history(1)
+        if scores:
+            latest = scores[0]
+            SIGNAL_COLORS = {
+                "STRONG_BULLISH": "green bold",
+                "BULLISH": "green",
+                "NEUTRAL": "yellow",
+                "BEARISH": "red",
+                "STRONG_BEARISH": "red bold",
+            }
+            color = SIGNAL_COLORS.get(latest.signal.value, "white")
+            console.print(f"[dim]Latest trend:[/dim] [{color}]{latest.signal.value}[/{color}] "
+                         f"(Score: {latest.score:+d}, {latest.confidence*100:.0f}% confidence)")
+
 
 # ============================================================
 # CLI ENTRY POINT
@@ -912,12 +1068,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python ralph_tracker.py                    # Start tracking
+  python ralph_tracker.py                    # Start tracking with trend analysis
   python ralph_tracker.py --config my.yaml   # Use custom config
   python ralph_tracker.py --interval 30      # Poll every 30 seconds
   python ralph_tracker.py --snapshot         # Show current balances only
   python ralph_tracker.py --history 24h      # Show signals from last 24 hours
   python ralph_tracker.py --add-wallet "whale_4" "ABC123..."
+
+Trend Analysis:
+  python ralph_tracker.py --trends           # Run full trend analysis
+  python ralph_tracker.py --trend-history 7  # Show trend history for 7 days
+
+Trend signals:
+  STRONG_BULLISH  - Multiple whales accumulating, strong holder growth
+  BULLISH         - Positive whale activity
+  NEUTRAL         - Consolidation, no clear direction
+  BEARISH         - Whale distribution signals
+  STRONG_BEARISH  - Multiple whales distributing, declining liquidity
         """
     )
 
@@ -953,6 +1120,25 @@ Examples:
     )
 
     parser.add_argument(
+        '--trends', '-t',
+        action='store_true',
+        help='Run full trend analysis (7-day whale behavior, holder count, liquidity)'
+    )
+
+    parser.add_argument(
+        '--trend-history',
+        type=int,
+        metavar='DAYS',
+        help='Show trend score history for N days'
+    )
+
+    parser.add_argument(
+        '--no-trend-recording',
+        action='store_true',
+        help='Disable trend data recording during polling'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose output'
@@ -974,10 +1160,15 @@ Examples:
     elif args.history:
         hours = parse_history_arg(args.history)
         tracker.show_history(hours)
+    elif args.trends:
+        tracker.run_trend_analysis()
+    elif args.trend_history:
+        tracker.show_trend_history(args.trend_history)
     elif args.snapshot:
         tracker.run_snapshot()
     else:
-        tracker.run_polling()
+        record_trends = not args.no_trend_recording
+        tracker.run_polling(record_trends=record_trends)
 
 
 if __name__ == "__main__":
