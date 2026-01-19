@@ -71,7 +71,7 @@ cex_wallets:
     address: "bybit_address_placeholder"
 
 settings:
-  poll_interval_seconds: 60
+  poll_interval_seconds: 300
   log_file: "ralph_tracker.log"
   state_file: "ralph_tracker_state.json"
   rpc_url: "https://mainnet.helius-rpc.com/?api-key=e359478f-68a9-4663-9e11-681093537853"
@@ -82,6 +82,12 @@ settings:
   retry_delay_seconds: 2
   request_timeout_seconds: 30
 
-# API Keys (set via environment variables or .env file)
-# SOLSCAN_API_KEY=your_key_here
-# BIRDEYE_API_KEY=your_key_here
+email:
+  enabled: true
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+  sender_email: "luminaitapp@gmail.com"
+  sender_password: "dnfcmeutinwdchwh"
+  recipient_emails:
+    - "luminaitapp@gmail.com"
+  report_interval_hours: 6

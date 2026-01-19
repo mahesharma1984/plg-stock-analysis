@@ -22,10 +22,13 @@ Features:
 import argparse
 import json
 import os
+import smtplib
 import sys
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import base58
@@ -91,6 +94,18 @@ class Signal:
 
 
 @dataclass
+class EmailConfig:
+    """Email notification configuration."""
+    enabled: bool = False
+    smtp_server: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    sender_email: str = ""
+    sender_password: str = ""
+    recipient_emails: List[str] = field(default_factory=list)
+    report_interval_hours: int = 6
+
+
+@dataclass
 class TrackerConfig:
     """Configuration for the tracker."""
     token_address: str = ""
@@ -99,7 +114,7 @@ class TrackerConfig:
     total_supply: int = 1_000_000_000
     wallets: List[Dict] = field(default_factory=list)
     cex_wallets: List[Dict] = field(default_factory=list)
-    poll_interval: int = 60
+    poll_interval: int = 300  # 5 minutes default
     log_file: str = "ralph_tracker.log"
     state_file: str = "ralph_tracker_state.json"
     rpc_url: str = "https://api.mainnet-beta.solana.com"
@@ -107,6 +122,7 @@ class TrackerConfig:
     max_retries: int = 3
     retry_delay: int = 2
     request_timeout: int = 30
+    email: EmailConfig = field(default_factory=EmailConfig)
 
 
 # ============================================================
@@ -146,6 +162,18 @@ def load_config(config_path: str) -> TrackerConfig:
     config.max_retries = settings.get('max_retries', config.max_retries)
     config.retry_delay = settings.get('retry_delay_seconds', config.retry_delay)
     config.request_timeout = settings.get('request_timeout_seconds', config.request_timeout)
+
+    # Email configuration
+    email_cfg = data.get('email', {})
+    config.email = EmailConfig(
+        enabled=email_cfg.get('enabled', False),
+        smtp_server=email_cfg.get('smtp_server', 'smtp.gmail.com'),
+        smtp_port=email_cfg.get('smtp_port', 587),
+        sender_email=os.getenv('RALPH_EMAIL_SENDER', email_cfg.get('sender_email', '')),
+        sender_password=os.getenv('RALPH_EMAIL_PASSWORD', email_cfg.get('sender_password', '')),
+        recipient_emails=[e for e in email_cfg.get('recipient_emails', []) if e],  # Filter empty strings
+        report_interval_hours=email_cfg.get('report_interval_hours', 6)
+    )
 
     return config
 
@@ -548,6 +576,458 @@ class TrackerLogger:
 
 
 # ============================================================
+# EMAIL NOTIFICATIONS
+# ============================================================
+
+class EmailNotifier:
+    """Sends email notifications with trend and whale reports."""
+
+    def __init__(self, config: EmailConfig, token_decimals: int = 6):
+        self.config = config
+        self.decimals = token_decimals
+        self.last_email_time: Optional[datetime] = None
+
+    def is_enabled(self) -> bool:
+        """Check if email notifications are properly configured."""
+        return (
+            self.config.enabled and
+            self.config.sender_email and
+            self.config.sender_password and
+            len(self.config.recipient_emails) > 0
+        )
+
+    def should_send_report(self) -> bool:
+        """Check if it's time to send the next report."""
+        if not self.is_enabled():
+            return False
+
+        if self.last_email_time is None:
+            return True
+
+        hours_since_last = (datetime.utcnow() - self.last_email_time).total_seconds() / 3600
+        return hours_since_last >= self.config.report_interval_hours
+
+    def format_balance(self, raw_balance: int) -> str:
+        """Format token balance for display."""
+        balance = raw_balance / (10 ** self.decimals)
+        if balance >= 1_000_000:
+            return f"{balance/1_000_000:.1f}M"
+        elif balance >= 1_000:
+            return f"{balance/1_000:.1f}K"
+        else:
+            return f"{balance:.0f}"
+
+    def build_report_html(
+        self,
+        wallet_states: Dict[str, 'WalletState'],
+        trend_score: Optional[Any] = None,
+        recent_signals: Optional[List['Signal']] = None
+    ) -> str:
+        """Build HTML email report."""
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+        # Start HTML
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
+                h2 {{ color: #34495e; margin-top: 30px; }}
+                .trend-box {{ padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; }}
+                .bullish {{ background: linear-gradient(135deg, #27ae60, #2ecc71); color: white; }}
+                .bearish {{ background: linear-gradient(135deg, #c0392b, #e74c3c); color: white; }}
+                .neutral {{ background: linear-gradient(135deg, #f39c12, #f1c40f); color: white; }}
+                table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+                th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
+                th {{ background-color: #3498db; color: white; }}
+                tr:hover {{ background-color: #f5f5f5; }}
+                .buy {{ color: #27ae60; font-weight: bold; }}
+                .sell {{ color: #e74c3c; font-weight: bold; }}
+                .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #7f8c8d; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <h1>🐋 RALPH Whale Tracker Report</h1>
+            <p>Report generated: {now}</p>
+        """
+
+        # Trend summary box
+        if trend_score:
+            signal = trend_score.signal.value if hasattr(trend_score.signal, 'value') else str(trend_score.signal)
+            phase = trend_score.whale_phase.value if hasattr(trend_score.whale_phase, 'value') else str(trend_score.whale_phase)
+            
+            box_class = "neutral"
+            if "BULLISH" in signal:
+                box_class = "bullish"
+            elif "BEARISH" in signal:
+                box_class = "bearish"
+
+            html += f"""
+            <div class="trend-box {box_class}">
+                <h2 style="margin:0; color:white;">📊 Trend Signal: {signal}</h2>
+                <p style="font-size: 24px; margin: 10px 0;">Score: {trend_score.score:+d}/100</p>
+                <p>Confidence: {trend_score.confidence*100:.0f}% | Whale Phase: {phase}</p>
+            </div>
+            """
+
+        # Whale wallet table
+        html += """
+            <h2>🐋 Whale Wallet Status</h2>
+            <table>
+                <tr>
+                    <th>Wallet</th>
+                    <th>Balance</th>
+                    <th>% Supply</th>
+                    <th>Last Activity</th>
+                </tr>
+        """
+
+        for ws in sorted(wallet_states.values(), key=lambda x: x.balance_ralph, reverse=True):
+            balance_str = self.format_balance(ws.balance_ralph)
+            pct_str = f"{ws.pct_supply:.2f}%"
+            last_change = ws.last_tx_type if ws.last_tx_type else "No change"
+            
+            change_class = ""
+            if "BUY" in last_change:
+                change_class = "buy"
+            elif "SELL" in last_change:
+                change_class = "sell"
+
+            html += f"""
+                <tr>
+                    <td><strong>{ws.label}</strong></td>
+                    <td>{balance_str} RALPH</td>
+                    <td>{pct_str}</td>
+                    <td class="{change_class}">{last_change}</td>
+                </tr>
+            """
+
+        html += "</table>"
+
+        # Recent signals section
+        if recent_signals and len(recent_signals) > 0:
+            html += """
+                <h2>📢 Recent Signals (Last 6 Hours)</h2>
+                <table>
+                    <tr>
+                        <th>Time</th>
+                        <th>Type</th>
+                        <th>Wallet</th>
+                        <th>Amount</th>
+                    </tr>
+            """
+
+            for sig in recent_signals[:10]:  # Show last 10
+                sig_class = "buy" if "BUY" in sig.signal_type else "sell" if "SELL" in sig.signal_type else ""
+                amount_str = self.format_balance(sig.amount) if sig.amount else "-"
+                ts = sig.timestamp[:16] if sig.timestamp else "-"
+
+                html += f"""
+                    <tr>
+                        <td>{ts}</td>
+                        <td class="{sig_class}">{sig.signal_type}</td>
+                        <td>{sig.wallet_label}</td>
+                        <td>{amount_str}</td>
+                    </tr>
+                """
+
+            html += "</table>"
+
+        # Footer
+        html += f"""
+            <div class="footer">
+                <p>This is an automated report from RALPH Whale Tracker.</p>
+                <p>Next report in {self.config.report_interval_hours} hours.</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        return html
+
+    def build_report_text(
+        self,
+        wallet_states: Dict[str, 'WalletState'],
+        trend_score: Optional[Any] = None,
+        recent_signals: Optional[List['Signal']] = None
+    ) -> str:
+        """Build plain text email report."""
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        
+        lines = [
+            "=" * 50,
+            "RALPH WHALE TRACKER REPORT",
+            f"Generated: {now}",
+            "=" * 50,
+            ""
+        ]
+
+        if trend_score:
+            signal = trend_score.signal.value if hasattr(trend_score.signal, 'value') else str(trend_score.signal)
+            phase = trend_score.whale_phase.value if hasattr(trend_score.whale_phase, 'value') else str(trend_score.whale_phase)
+            
+            lines.extend([
+                "TREND SUMMARY",
+                "-" * 30,
+                f"Signal: {signal}",
+                f"Score: {trend_score.score:+d}/100",
+                f"Confidence: {trend_score.confidence*100:.0f}%",
+                f"Whale Phase: {phase}",
+                ""
+            ])
+
+        lines.extend([
+            "WHALE WALLET STATUS",
+            "-" * 30
+        ])
+
+        for ws in sorted(wallet_states.values(), key=lambda x: x.balance_ralph, reverse=True):
+            balance_str = self.format_balance(ws.balance_ralph)
+            pct_str = f"{ws.pct_supply:.2f}%"
+            last_change = ws.last_tx_type if ws.last_tx_type else "No change"
+            lines.append(f"{ws.label}: {balance_str} ({pct_str}) - {last_change}")
+
+        if recent_signals and len(recent_signals) > 0:
+            lines.extend([
+                "",
+                "RECENT SIGNALS",
+                "-" * 30
+            ])
+            for sig in recent_signals[:10]:
+                amount_str = self.format_balance(sig.amount) if sig.amount else "-"
+                ts = sig.timestamp[:16] if sig.timestamp else "-"
+                lines.append(f"{ts} | {sig.signal_type} | {sig.wallet_label} | {amount_str}")
+
+        lines.extend([
+            "",
+            "=" * 50,
+            f"Next report in {self.config.report_interval_hours} hours",
+            "=" * 50
+        ])
+
+        return "\n".join(lines)
+
+    def send_report(
+        self,
+        wallet_states: Dict[str, 'WalletState'],
+        trend_score: Optional[Any] = None,
+        recent_signals: Optional[List['Signal']] = None
+    ) -> bool:
+        """Send email report."""
+        if not self.is_enabled():
+            return False
+
+        try:
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"🐋 RALPH Whale Report - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+            msg['From'] = self.config.sender_email
+            msg['To'] = ", ".join(self.config.recipient_emails)
+
+            # Attach both plain text and HTML versions
+            text_content = self.build_report_text(wallet_states, trend_score, recent_signals)
+            html_content = self.build_report_html(wallet_states, trend_score, recent_signals)
+
+            msg.attach(MIMEText(text_content, 'plain'))
+            msg.attach(MIMEText(html_content, 'html'))
+
+            # Send email
+            with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:
+                server.starttls()
+                server.login(self.config.sender_email, self.config.sender_password)
+                server.send_message(msg)
+
+            self.last_email_time = datetime.utcnow()
+            console.print(f"[green]📧 Email report sent to {len(self.config.recipient_emails)} recipient(s)[/green]")
+            return True
+
+        except smtplib.SMTPAuthenticationError:
+            console.print("[red]Email error: Authentication failed. Check your email/password.[/red]")
+            console.print("[dim]For Gmail, use an App Password: https://support.google.com/accounts/answer/185833[/dim]")
+            return False
+        except smtplib.SMTPException as e:
+            console.print(f"[red]Email error: {e}[/red]")
+            return False
+        except Exception as e:
+            console.print(f"[red]Failed to send email: {e}[/red]")
+            return False
+
+    def send_alert(self, signal: 'Signal') -> bool:
+        """Send immediate email alert for whale activity."""
+        if not self.is_enabled():
+            return False
+
+        # Determine alert styling based on signal type
+        alert_configs = {
+            "WHALE_BUY": ("🟢", "#27ae60", "WHALE BUY ALERT"),
+            "WHALE_SELL": ("🔴", "#e74c3c", "WHALE SELL ALERT"),
+            "WHALE_TO_CEX": ("🚨", "#c0392b", "CRITICAL: CEX TRANSFER"),
+            "ACCUMULATION": ("📈", "#27ae60", "ACCUMULATION DETECTED"),
+            "DISTRIBUTION": ("📉", "#e74c3c", "DISTRIBUTION DETECTED"),
+            "LIQUIDITY_DROP": ("💧", "#e74c3c", "LIQUIDITY DROP"),
+            "LIQUIDITY_ADD": ("💧", "#27ae60", "LIQUIDITY ADDED"),
+        }
+
+        icon, color, title = alert_configs.get(
+            signal.signal_type, 
+            ("⚠️", "#f39c12", "WHALE ALERT")
+        )
+
+        amount_str = self.format_balance(signal.amount) if signal.amount else "N/A"
+        balance_str = self.format_balance(signal.new_balance) if signal.new_balance else "N/A"
+        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+        # Build HTML alert email
+        html = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .alert-box {{ 
+                    background: linear-gradient(135deg, {color}, {color}dd); 
+                    color: white; 
+                    padding: 30px; 
+                    border-radius: 15px; 
+                    text-align: center;
+                    margin: 20px 0;
+                }}
+                .alert-icon {{ font-size: 48px; }}
+                .alert-title {{ font-size: 24px; font-weight: bold; margin: 15px 0; }}
+                .details {{ background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                .detail-row {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; }}
+                .label {{ color: #7f8c8d; }}
+                .value {{ font-weight: bold; color: #2c3e50; }}
+                .action-text {{ 
+                    font-size: 18px; 
+                    padding: 15px; 
+                    background: {"#d4edda" if "BUY" in signal.signal_type or "ADD" in signal.signal_type else "#f8d7da"}; 
+                    border-radius: 8px;
+                    color: {"#155724" if "BUY" in signal.signal_type or "ADD" in signal.signal_type else "#721c24"};
+                }}
+                .footer {{ margin-top: 30px; color: #7f8c8d; font-size: 12px; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="alert-box">
+                <div class="alert-icon">{icon}</div>
+                <div class="alert-title">{title}</div>
+            </div>
+            
+            <div class="details">
+                <div class="detail-row">
+                    <span class="label">Whale</span>
+                    <span class="value">{signal.wallet_label}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Action</span>
+                    <span class="value">{signal.signal_type.replace('_', ' ')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Amount</span>
+                    <span class="value">{amount_str} RALPH</span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">New Balance</span>
+                    <span class="value">{balance_str} RALPH ({signal.new_pct_supply:.2f}% supply)</span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Change</span>
+                    <span class="value" style="color: {color};">{signal.pct_change:+.2f}%</span>
+                </div>
+                <div class="detail-row">
+                    <span class="label">Time</span>
+                    <span class="value">{now}</span>
+                </div>
+        """
+
+        if signal.tx_signature:
+            html += f"""
+                <div class="detail-row">
+                    <span class="label">Transaction</span>
+                    <span class="value"><a href="https://solscan.io/tx/{signal.tx_signature}">View on Solscan</a></span>
+                </div>
+            """
+
+        if signal.target_label:  # CEX transfer
+            html += f"""
+                <div class="detail-row">
+                    <span class="label">Destination</span>
+                    <span class="value" style="color: #e74c3c; font-weight: bold;">{signal.target_label.upper()}</span>
+                </div>
+            """
+
+        # Add action recommendation
+        if signal.signal_type == "WHALE_TO_CEX":
+            action_text = "⚠️ POTENTIAL DUMP INCOMING - Consider reducing position"
+        elif signal.signal_type == "WHALE_SELL":
+            action_text = "📉 Whale is selling - Monitor for more activity"
+        elif signal.signal_type == "WHALE_BUY":
+            action_text = "📈 Whale is accumulating - Bullish signal"
+        elif signal.signal_type == "DISTRIBUTION":
+            action_text = "⚠️ Multiple whales selling - Bearish pattern"
+        elif signal.signal_type == "ACCUMULATION":
+            action_text = "✅ Multiple whales buying - Bullish pattern"
+        else:
+            action_text = "Monitor the situation"
+
+        html += f"""
+            </div>
+            
+            <div class="action-text">
+                {action_text}
+            </div>
+            
+            <div class="footer">
+                <p>RALPH Whale Tracker - Instant Alert</p>
+                <p>Wallet: {signal.wallet_address[:8]}...{signal.wallet_address[-6:]}</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Plain text version
+        text = f"""
+{title}
+{'='*50}
+
+Whale: {signal.wallet_label}
+Action: {signal.signal_type}
+Amount: {amount_str} RALPH
+New Balance: {balance_str} RALPH ({signal.new_pct_supply:.2f}% supply)
+Change: {signal.pct_change:+.2f}%
+Time: {now}
+{'Transaction: https://solscan.io/tx/' + signal.tx_signature if signal.tx_signature else ''}
+
+{action_text}
+
+{'='*50}
+RALPH Whale Tracker - Instant Alert
+        """
+
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"{icon} {title}: {signal.wallet_label} - {amount_str} RALPH"
+            msg['From'] = self.config.sender_email
+            msg['To'] = ", ".join(self.config.recipient_emails)
+
+            msg.attach(MIMEText(text, 'plain'))
+            msg.attach(MIMEText(html, 'html'))
+
+            with smtplib.SMTP(self.config.smtp_server, self.config.smtp_port) as server:
+                server.starttls()
+                server.login(self.config.sender_email, self.config.sender_password)
+                server.send_message(msg)
+
+            console.print(f"[green]📧 Alert sent: {signal.signal_type} - {signal.wallet_label}[/green]")
+            return True
+
+        except Exception as e:
+            console.print(f"[red]Failed to send alert email: {e}[/red]")
+            return False
+
+
+# ============================================================
 # CLI OUTPUT FORMATTING
 # ============================================================
 
@@ -765,6 +1245,11 @@ class RalphWhaleTracker:
             except Exception as e:
                 console.print(f"[yellow]Trend analysis unavailable: {e}[/yellow]")
 
+        # Initialize email notifier
+        self.email_notifier = EmailNotifier(self.config.email, self.config.token_decimals)
+        if self.email_notifier.is_enabled():
+            console.print(f"[dim]Email reports enabled (every {self.config.email.report_interval_hours}h)[/dim]")
+
     def _initialize_wallet_states(self):
         """Initialize wallet states from config."""
         for wallet_cfg in self.config.wallets:
@@ -879,14 +1364,22 @@ class RalphWhaleTracker:
                         continue  # Signal already printed
                     self.formatter.print_wallet_status(ws)
 
-                # Print any detected signals
+                # Print any detected signals and send email alerts
                 for signal in signals:
                     self.formatter.print_signal(signal)
+                    # Send instant email alert for whale activity
+                    if signal.signal_type in ["WHALE_BUY", "WHALE_SELL", "WHALE_TO_CEX", 
+                                                "ACCUMULATION", "DISTRIBUTION"]:
+                        self.email_notifier.send_alert(signal)
 
                 # Record trend data periodically
                 if record_trends and poll_count % trend_record_interval == 0:
                     self.record_trend_data()
                     self.show_quick_trend()
+
+                # Send email report if it's time
+                if self.email_notifier.should_send_report():
+                    self.send_email_report()
 
                 console.print("-" * 60)
 
@@ -1044,6 +1537,41 @@ class RalphWhaleTracker:
             color = SIGNAL_COLORS.get(latest.signal.value, "white")
             console.print(f"[dim]Latest trend:[/dim] [{color}]{latest.signal.value}[/{color}] "
                          f"(Score: {latest.score:+d}, {latest.confidence*100:.0f}% confidence)")
+
+    def send_email_report(self):
+        """Send scheduled email report with trend and whale data."""
+        if not self.email_notifier.is_enabled():
+            return
+
+        console.print("[cyan]Preparing email report...[/cyan]")
+
+        # Get latest trend score
+        trend_score = None
+        if self.trend_tracker:
+            scores = self.trend_tracker.get_trend_history(1)
+            if scores:
+                trend_score = scores[0]
+
+        # Get recent signals from log
+        recent_signals = []
+        log_entries = self.logger.read_history(hours=self.config.email.report_interval_hours)
+        for entry in log_entries:
+            parts = entry.split('|')
+            if len(parts) >= 4 and parts[2] in ["WHALE_BUY", "WHALE_SELL", "WHALE_TO_CEX", "ACCUMULATION", "DISTRIBUTION"]:
+                recent_signals.append(Signal(
+                    signal_type=parts[2],
+                    wallet_label=parts[3] if len(parts) > 3 else "",
+                    wallet_address="",
+                    amount=int(parts[4]) if len(parts) > 4 and parts[4].lstrip('-+').isdigit() else 0,
+                    timestamp=parts[0]
+                ))
+
+        # Send the report
+        self.email_notifier.send_report(
+            wallet_states=self.wallet_states,
+            trend_score=trend_score,
+            recent_signals=recent_signals
+        )
 
 
 # ============================================================
