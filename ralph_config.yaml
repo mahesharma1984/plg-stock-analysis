@@ -4,30 +4,59 @@
 token:
   address: "CxWPdDBqxVo3fnTMRTvNuSrd4gkp78udSrFvkVDBAGS"
   symbol: "RALPH"
-  decimals: 6
+  decimals: 9
   total_supply: 1000000000  # 1 billion tokens
 
 wallets:
   - label: "whale_1"
-    address: "B93svZLmpNPdpBrNa6r1BbJphj2E7hTDx4fAfnHbKMUj"
-    notes: "Top holder ~9.33%"
+    address: "B93svZrj7Rd7U4x3kzdVw72WeVDEu1ZqGJ44RqRM6mq5"
+    notes: "Top holder #1 - 93.3M RALPH (9.33%)"
     alert_threshold_pct: 1.0
 
   - label: "whale_2"
-    address: "5tFsLPyhWGJRdnHzTqKZWJfpnvMV4yHvmYqPaVRvJL5h"
-    notes: "#2 holder ~4.58%"
+    address: "4h2LVG9N7MberHdFogR9VsSoTpVcvChQCpmRPCPzw4QL"
+    notes: "Top holder #2 - 28.8M RALPH (2.88%)"
     alert_threshold_pct: 1.0
 
   - label: "whale_3"
-    address: "HLnpSzBvqJVxT2FmZBmqyHJ8dZB2oiQ31iM2k3Jxq3Yv"
-    notes: "#3 holder ~4.20%"
+    address: "D6CZvbnsjffowaS4zagotHfdmZthxNBVqKwzp9C3tZYS"
+    notes: "Top holder #3 - 26.5M RALPH (2.65%)"
     alert_threshold_pct: 1.0
 
-  - label: "liquidity_pool"
-    address: "DbyK8gEiXwNeh2zFW2Lo1svuQ1WkHAeQyNDsRaKQ6BHf"
-    notes: "Meteora primary pool"
-    alert_threshold_pct: 10.0
-    is_pool: true
+  - label: "whale_4"
+    address: "2mvtNnTP2CBRz24q1BzmDX9cv2bQBsY8E77D32qkYKCm"
+    notes: "Top holder #4 - 19.6M RALPH (1.96%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_5"
+    address: "GHzMXqRg9rY9PkqJZB3go87z9Tq7iPovTJnbLddYqBmx"
+    notes: "Top holder #5 - 18.1M RALPH (1.81%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_6"
+    address: "9qMEvPibix8AsdwXsNLJQuNTfTEj1g5kz8LnzNzqYtai"
+    notes: "Top holder #6 - 17.5M RALPH (1.75%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_7"
+    address: "54ex3KwZ34CJSQyonBnvA8bkNpMhXF5qRCAW3y7JYTJh"
+    notes: "Top holder #7 - 16.8M RALPH (1.68%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_8"
+    address: "DgtqzuB3p7bCXTGxtYUbvUApEKco2qgevpMB1b6sKmov"
+    notes: "Top holder #8 - 14.3M RALPH (1.43%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_9"
+    address: "CduMPoQNsBvZ1g9QneAgFMobbyUceUykWwmixVG4yukT"
+    notes: "Top holder #9 - 13.9M RALPH (1.39%)"
+    alert_threshold_pct: 1.0
+
+  - label: "whale_10"
+    address: "A12G3UBUfGZbWpc5QJQb3P9gonfBSqoaeU4TLaRQrDQV"
+    notes: "Top holder #10 - 13.6M RALPH (1.36%)"
+    alert_threshold_pct: 1.0
 
 cex_wallets:
   - label: "binance"
@@ -45,10 +74,10 @@ settings:
   poll_interval_seconds: 60
   log_file: "ralph_tracker.log"
   state_file: "ralph_tracker_state.json"
-  rpc_url: "https://api.mainnet-beta.solana.com"
+  rpc_url: "https://mainnet.helius-rpc.com/?api-key=e359478f-68a9-4663-9e11-681093537853"
   rpc_backup_urls:
+    - "https://api.mainnet-beta.solana.com"
     - "https://solana-mainnet.g.alchemy.com/v2/demo"
-    - "https://rpc.ankr.com/solana"
   max_retries: 3
   retry_delay_seconds: 2
   request_timeout_seconds: 30
