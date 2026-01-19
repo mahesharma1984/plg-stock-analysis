@@ -1,0 +1,26 @@
+# RALPH Whale Tracker Dependencies
+
+# Solana blockchain interaction
+solana>=0.30.0
+solders>=0.18.0
+
+# HTTP requests
+requests>=2.31.0
+aiohttp>=3.9.0
+
+# CLI formatting and colors
+rich>=13.7.0
+click>=8.1.0
+
+# Configuration and environment
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Scheduling
+schedule>=1.2.0
+
+# Date/time handling
+python-dateutil>=2.8.2
+
+# Base58 encoding for Solana addresses
+base58>=2.1.1

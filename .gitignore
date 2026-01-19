@@ -10,7 +10,11 @@ venv/
 
 # Data files (if large)
 *.csv
-*.json
+
+# RALPH Tracker state and logs
+ralph_tracker_state.json
+ralph_tracker.log
+*.log
 
 # IDE
 .vscode/
