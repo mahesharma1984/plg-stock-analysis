@@ -26,7 +26,7 @@ import smtplib
 import sys
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -278,9 +278,20 @@ class SolanaRPCClient:
         return None
 
     def get_token_balance(self, owner: str, token_mint: str) -> Optional[int]:
-        """Get token balance for a wallet address."""
+        """Get token balance for a wallet address.
+
+        Returns:
+            int: The token balance if successful
+            None: If API call failed (distinguishes from actual 0 balance)
+        """
         accounts = self.get_token_accounts_by_owner(owner, token_mint)
-        if not accounts:
+
+        # API failure - return None to distinguish from real 0 balance
+        if accounts is None:
+            return None
+
+        # Empty list means wallet has no token accounts = real 0 balance
+        if len(accounts) == 0:
             return 0
 
         total_balance = 0
@@ -328,7 +339,12 @@ class SignalDetector:
         new_balance: int,
         recent_sigs: Optional[List[Dict]] = None
     ) -> Optional[Signal]:
-        """Detect and classify a balance change."""
+        """Detect and classify a balance change.
+
+        Includes validation to prevent false signals:
+        - Changes TO 0 require transaction signature confirmation
+        - Changes > 50% are logged as suspicious for review
+        """
 
         prev_balance = wallet_state.balance_ralph
         balance_diff = new_balance - prev_balance
@@ -336,11 +352,43 @@ class SignalDetector:
         if balance_diff == 0:
             return None
 
+        # VALIDATION: Balance dropping to exactly 0 is suspicious
+        # Could be API failure returning empty account list
+        # Require transaction signature to confirm
+        if new_balance == 0 and prev_balance > 0:
+            if not recent_sigs or len(recent_sigs) == 0:
+                console.print(
+                    f"[yellow]Ignoring suspicious balance drop to 0 for {wallet_state.label} "
+                    f"(no confirming transaction found)[/yellow]"
+                )
+                return None
+
+            # Check if there's a recent transaction (within last 10 minutes)
+            # that could explain the balance drop
+            if recent_sigs:
+                latest_sig = recent_sigs[0]
+                block_time = latest_sig.get("blockTime", 0)
+                now = int(datetime.now(timezone.utc).timestamp())
+                # If no recent transaction (>10 min old), ignore the change
+                if block_time > 0 and (now - block_time) > 600:
+                    console.print(
+                        f"[yellow]Ignoring suspicious balance drop to 0 for {wallet_state.label} "
+                        f"(last tx is {(now - block_time) // 60} min old)[/yellow]"
+                    )
+                    return None
+
         # Calculate percentage change
         if prev_balance > 0:
             pct_change = (balance_diff / prev_balance) * 100
         else:
             pct_change = 100.0 if balance_diff > 0 else 0.0
+
+        # VALIDATION: Flag large changes (>50%) as suspicious but still record
+        if abs(pct_change) > 50:
+            console.print(
+                f"[yellow]Large balance change detected for {wallet_state.label}: "
+                f"{pct_change:.1f}% - verify on-chain[/yellow]"
+            )
 
         # Check if change exceeds threshold
         if abs(pct_change) < wallet_state.alert_threshold_pct:
@@ -351,15 +399,39 @@ class SignalDetector:
         display_balance = new_balance / (10 ** decimals)
         new_pct_supply = (display_balance / self.config.total_supply) * 100
 
-        # Determine signal type
+        # Determine signal type with graduated severity
         if balance_diff > 0:
             signal_type = "WHALE_BUY"
             tx_type = "BUY"
             severity = "INFO"
         else:
-            signal_type = "WHALE_SELL"
-            tx_type = "SELL"
-            severity = "WARNING"
+            # Graduated sell signals based on severity
+            if new_balance == 0:
+                # Complete exit - highest priority
+                signal_type = "WHALE_EXIT"
+                tx_type = "EXIT"
+                severity = "CRITICAL"
+                console.print(
+                    f"[red bold]🚨 FULL EXIT: {wallet_state.label} sold 100% of holdings![/red bold]"
+                )
+            elif abs(pct_change) > 50:
+                # Major dump - high priority
+                signal_type = "WHALE_DUMP"
+                tx_type = "DUMP"
+                severity = "CRITICAL"
+                console.print(
+                    f"[red]⚠️ MAJOR DUMP: {wallet_state.label} sold {abs(pct_change):.0f}% of holdings[/red]"
+                )
+            elif abs(pct_change) > 25:
+                # Significant sell
+                signal_type = "WHALE_SELL"
+                tx_type = "SELL"
+                severity = "WARNING"
+            else:
+                # Minor sell
+                signal_type = "WHALE_SELL"
+                tx_type = "SELL"
+                severity = "INFO"
 
         # Get latest transaction signature
         tx_sig = ""
@@ -621,9 +693,11 @@ class EmailNotifier:
         self,
         wallet_states: Dict[str, 'WalletState'],
         trend_score: Optional[Any] = None,
-        recent_signals: Optional[List['Signal']] = None
+        recent_signals: Optional[List['Signal']] = None,
+        holder_summary: Optional[Dict] = None,
+        new_whales: Optional[List[Dict]] = None
     ) -> str:
-        """Build HTML email report."""
+        """Build HTML email report with holder data and new whale alerts."""
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
         # Start HTML
@@ -631,23 +705,31 @@ class EmailNotifier:
         <html>
         <head>
             <style>
-                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: #f5f6fa; }}
+                .container {{ background: white; padding: 30px; border-radius: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
                 h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
                 h2 {{ color: #34495e; margin-top: 30px; }}
                 .trend-box {{ padding: 20px; border-radius: 10px; margin: 20px 0; text-align: center; }}
                 .bullish {{ background: linear-gradient(135deg, #27ae60, #2ecc71); color: white; }}
                 .bearish {{ background: linear-gradient(135deg, #c0392b, #e74c3c); color: white; }}
                 .neutral {{ background: linear-gradient(135deg, #f39c12, #f1c40f); color: white; }}
+                .stats-row {{ display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap; }}
+                .stat-box {{ flex: 1; min-width: 150px; padding: 15px; background: #f8f9fa; border-radius: 10px; text-align: center; }}
+                .stat-value {{ font-size: 24px; font-weight: bold; color: #2c3e50; }}
+                .stat-label {{ font-size: 12px; color: #7f8c8d; margin-top: 5px; }}
+                .alert-box {{ background: linear-gradient(135deg, #9b59b6, #8e44ad); color: white; padding: 20px; border-radius: 10px; margin: 20px 0; }}
                 table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
                 th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
                 th {{ background-color: #3498db; color: white; }}
                 tr:hover {{ background-color: #f5f5f5; }}
                 .buy {{ color: #27ae60; font-weight: bold; }}
                 .sell {{ color: #e74c3c; font-weight: bold; }}
+                .new-whale {{ background: #fff3cd; }}
                 .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; color: #7f8c8d; font-size: 12px; }}
             </style>
         </head>
         <body>
+            <div class="container">
             <h1>🐋 RALPH Whale Tracker Report</h1>
             <p>Report generated: {now}</p>
         """
@@ -671,9 +753,67 @@ class EmailNotifier:
             </div>
             """
 
+        # Holder concentration stats
+        if holder_summary:
+            top_10 = holder_summary.get("top_10_concentration", 0)
+            top_50 = holder_summary.get("top_50_concentration", 0)
+            trend = holder_summary.get("trend", {})
+            trend_label = trend.get("trend", "UNKNOWN")
+            trend_color = "#27ae60" if trend_label == "GROWING" else "#e74c3c" if trend_label == "DECLINING" else "#f39c12"
+            
+            html += f"""
+            <h2>📈 Holder Concentration</h2>
+            <div class="stats-row">
+                <div class="stat-box">
+                    <div class="stat-value">{top_10:.1f}%</div>
+                    <div class="stat-label">Top 10 Holders</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">{top_50:.1f}%</div>
+                    <div class="stat-label">Top 50 Holders</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value" style="color: {trend_color};">{trend_label}</div>
+                    <div class="stat-label">Holder Trend</div>
+                </div>
+            </div>
+            """
+
+        # New whale discovery alert
+        if new_whales and len(new_whales) > 0:
+            html += f"""
+            <div class="alert-box">
+                <h2 style="margin:0; color:white;">🆕 New Whales Discovered!</h2>
+                <p>{len(new_whales)} new large holder(s) detected</p>
+            </div>
+            <table>
+                <tr>
+                    <th>Rank</th>
+                    <th>Address</th>
+                    <th>Balance</th>
+                    <th>% Supply</th>
+                </tr>
+            """
+            for whale in new_whales:
+                addr = whale.get("address", "")
+                short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
+                balance = whale.get("balance_display", "?")
+                pct = whale.get("pct_supply", 0)
+                rank = whale.get("rank", "?")
+                
+                html += f"""
+                <tr class="new-whale">
+                    <td>#{rank}</td>
+                    <td><code>{short_addr}</code></td>
+                    <td>{balance} RALPH</td>
+                    <td><strong>{pct:.2f}%</strong></td>
+                </tr>
+                """
+            html += "</table>"
+
         # Whale wallet table
         html += """
-            <h2>🐋 Whale Wallet Status</h2>
+            <h2>🐋 Tracked Whale Status</h2>
             <table>
                 <tr>
                     <th>Wallet</th>
@@ -740,6 +880,7 @@ class EmailNotifier:
                 <p>This is an automated report from RALPH Whale Tracker.</p>
                 <p>Next report in {self.config.report_interval_hours} hours.</p>
             </div>
+            </div>
         </body>
         </html>
         """
@@ -750,7 +891,9 @@ class EmailNotifier:
         self,
         wallet_states: Dict[str, 'WalletState'],
         trend_score: Optional[Any] = None,
-        recent_signals: Optional[List['Signal']] = None
+        recent_signals: Optional[List['Signal']] = None,
+        holder_summary: Optional[Dict] = None,
+        new_whales: Optional[List[Dict]] = None
     ) -> str:
         """Build plain text email report."""
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -776,6 +919,34 @@ class EmailNotifier:
                 f"Whale Phase: {phase}",
                 ""
             ])
+
+        if holder_summary:
+            top_10 = holder_summary.get("top_10_concentration", 0)
+            top_50 = holder_summary.get("top_50_concentration", 0)
+            trend = holder_summary.get("trend", {})
+            trend_label = trend.get("trend", "UNKNOWN")
+            
+            lines.extend([
+                "HOLDER CONCENTRATION",
+                "-" * 30,
+                f"Top 10 Holders: {top_10:.1f}%",
+                f"Top 50 Holders: {top_50:.1f}%",
+                f"Holder Trend: {trend_label}",
+                ""
+            ])
+
+        if new_whales and len(new_whales) > 0:
+            lines.extend([
+                "🆕 NEW WHALES DISCOVERED",
+                "-" * 30
+            ])
+            for whale in new_whales:
+                addr = whale.get("address", "")
+                short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
+                balance = whale.get("balance_display", "?")
+                pct = whale.get("pct_supply", 0)
+                lines.append(f"#{whale.get('rank', '?')} {short_addr}: {balance} RALPH ({pct:.2f}%)")
+            lines.append("")
 
         lines.extend([
             "WHALE WALLET STATUS",
@@ -812,22 +983,31 @@ class EmailNotifier:
         self,
         wallet_states: Dict[str, 'WalletState'],
         trend_score: Optional[Any] = None,
-        recent_signals: Optional[List['Signal']] = None
+        recent_signals: Optional[List['Signal']] = None,
+        holder_summary: Optional[Dict] = None,
+        new_whales: Optional[List[Dict]] = None
     ) -> bool:
-        """Send email report."""
+        """Send email report with holder data and new whale alerts."""
         if not self.is_enabled():
             return False
 
         try:
             # Create message
+            subject_parts = ["🐋 RALPH Whale Report"]
+            if new_whales and len(new_whales) > 0:
+                subject_parts.append(f"🆕 {len(new_whales)} New Whale(s)!")
+            subject_parts.append(f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+            
             msg = MIMEMultipart('alternative')
-            msg['Subject'] = f"🐋 RALPH Whale Report - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC"
+            msg['Subject'] = " - ".join(subject_parts)
             msg['From'] = self.config.sender_email
             msg['To'] = ", ".join(self.config.recipient_emails)
 
             # Attach both plain text and HTML versions
-            text_content = self.build_report_text(wallet_states, trend_score, recent_signals)
-            html_content = self.build_report_html(wallet_states, trend_score, recent_signals)
+            text_content = self.build_report_text(wallet_states, trend_score, recent_signals, 
+                                                   holder_summary, new_whales)
+            html_content = self.build_report_html(wallet_states, trend_score, recent_signals,
+                                                   holder_summary, new_whales)
 
             msg.attach(MIMEText(text_content, 'plain'))
             msg.attach(MIMEText(html_content, 'html'))
@@ -1338,12 +1518,27 @@ class RalphWhaleTracker:
         self.formatter.print_snapshot_table(self.wallet_states)
         save_state(self.wallet_states, self.config.state_file)
 
-    def run_polling(self, record_trends: bool = True):
-        """Run continuous polling loop."""
-        self.formatter.print_header(
-            len(self.wallet_states),
-            self.config.poll_interval
-        )
+    def run_polling(self, record_trends: bool = True, passive_mode: bool = False):
+        """Run continuous polling loop.
+
+        Args:
+            record_trends: Whether to record trend data to database
+            passive_mode: If True, disables instant alerts and console signal printing.
+                         Data is still collected for later analysis.
+        """
+        if passive_mode:
+            console.print("[cyan]╔═══════════════════════════════════════════════════════════╗[/cyan]")
+            console.print("[cyan]║          PASSIVE COLLECTION MODE ENABLED                  ║[/cyan]")
+            console.print("[cyan]║  • Polling every 5 minutes                                ║[/cyan]")
+            console.print("[cyan]║  • Recording all data to database                         ║[/cyan]")
+            console.print("[cyan]║  • Instant alerts DISABLED                                ║[/cyan]")
+            console.print("[cyan]║  • Run --analyze N after collection to view results       ║[/cyan]")
+            console.print("[cyan]╚═══════════════════════════════════════════════════════════╝[/cyan]")
+        else:
+            self.formatter.print_header(
+                len(self.wallet_states),
+                self.config.poll_interval
+            )
 
         poll_count = 0
         trend_record_interval = 5  # Record trend data every N polls
@@ -1358,30 +1553,38 @@ class RalphWhaleTracker:
                 # Update and detect signals
                 signals = self.update_and_detect(new_balances)
 
-                # Print status for each wallet
-                for addr, ws in self.wallet_states.items():
-                    if any(s.wallet_address == addr for s in signals):
-                        continue  # Signal already printed
-                    self.formatter.print_wallet_status(ws)
+                if passive_mode:
+                    # Passive mode: minimal console output, no alerts
+                    now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                    console.print(f"[dim][{now}] Poll #{poll_count} - {len(signals)} signals detected (logged only)[/dim]")
+                else:
+                    # Normal mode: print status for each wallet
+                    for addr, ws in self.wallet_states.items():
+                        if any(s.wallet_address == addr for s in signals):
+                            continue  # Signal already printed
+                        self.formatter.print_wallet_status(ws)
 
-                # Print any detected signals and send email alerts
-                for signal in signals:
-                    self.formatter.print_signal(signal)
-                    # Send instant email alert for whale activity
-                    if signal.signal_type in ["WHALE_BUY", "WHALE_SELL", "WHALE_TO_CEX", 
-                                                "ACCUMULATION", "DISTRIBUTION"]:
-                        self.email_notifier.send_alert(signal)
+                    # Print any detected signals and send email alerts
+                    for signal in signals:
+                        self.formatter.print_signal(signal)
+                        # Send instant email alert for whale activity
+                        if signal.signal_type in ["WHALE_BUY", "WHALE_SELL", "WHALE_EXIT",
+                                                    "WHALE_DUMP", "WHALE_TO_CEX",
+                                                    "ACCUMULATION", "DISTRIBUTION"]:
+                            self.email_notifier.send_alert(signal)
 
-                # Record trend data periodically
+                # Record trend data periodically (always, even in passive mode)
                 if record_trends and poll_count % trend_record_interval == 0:
                     self.record_trend_data()
-                    self.show_quick_trend()
+                    if not passive_mode:
+                        self.show_quick_trend()
 
-                # Send email report if it's time
-                if self.email_notifier.should_send_report():
+                # Send email report if it's time (disabled in passive mode)
+                if not passive_mode and self.email_notifier.should_send_report():
                     self.send_email_report()
 
-                console.print("-" * 60)
+                if not passive_mode:
+                    console.print("-" * 60)
 
                 # Wait for next poll
                 time.sleep(self.config.poll_interval)
@@ -1392,6 +1595,8 @@ class RalphWhaleTracker:
             if record_trends:
                 self.record_trend_data()
             save_state(self.wallet_states, self.config.state_file)
+            if passive_mode:
+                console.print("[cyan]Data saved. Run --analyze N to analyze collected data.[/cyan]")
 
     def show_history(self, hours: int = 24):
         """Show historical signals."""
@@ -1538,26 +1743,182 @@ class RalphWhaleTracker:
             console.print(f"[dim]Latest trend:[/dim] [{color}]{latest.signal.value}[/{color}] "
                          f"(Score: {latest.score:+d}, {latest.confidence*100:.0f}% confidence)")
 
+    def run_weekly_analysis(self, days: int = 7):
+        """Run analysis on collected data for N days.
+
+        This is meant to be run after passive collection mode to analyze
+        the accumulated data and provide meaningful insights.
+        """
+        if not self.trend_tracker:
+            console.print("[red]Trend tracker not available. Check database connection.[/red]")
+            return
+
+        console.print(f"\n[cyan]╔═══════════════════════════════════════════════════════════╗[/cyan]")
+        console.print(f"[cyan]║        WHALE BEHAVIOR ANALYSIS ({days} DAYS)                  ║[/cyan]")
+        console.print(f"[cyan]╚═══════════════════════════════════════════════════════════╝[/cyan]\n")
+
+        # Get wallet history from database
+        db = self.trend_tracker.db
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Query wallet history
+        cursor = db.conn.execute("""
+            SELECT wallet, label, balance, pct_supply, tx_type, tx_amount, timestamp
+            FROM wallet_history
+            WHERE timestamp >= ?
+            ORDER BY wallet, timestamp
+        """, (cutoff_str,))
+        rows = cursor.fetchall()
+
+        if not rows:
+            console.print(f"[yellow]No data found for the last {days} days.[/yellow]")
+            console.print("[dim]Run the tracker in passive mode to collect data first.[/dim]")
+            return
+
+        # Organize by wallet
+        wallet_data: Dict[str, List] = {}
+        for row in rows:
+            wallet = row[0]
+            if wallet not in wallet_data:
+                wallet_data[wallet] = []
+            wallet_data[wallet].append({
+                "label": row[1],
+                "balance": row[2],
+                "pct_supply": row[3],
+                "tx_type": row[4],
+                "tx_amount": row[5],
+                "timestamp": row[6]
+            })
+
+        console.print(f"[green]Found {len(rows)} data points across {len(wallet_data)} wallets[/green]\n")
+
+        # Analyze each whale
+        from rich.table import Table
+        table = Table(title="Whale Behavior Summary")
+        table.add_column("Whale", style="cyan")
+        table.add_column("Start Balance", justify="right")
+        table.add_column("End Balance", justify="right")
+        table.add_column("Net Change", justify="right")
+        table.add_column("# Transactions", justify="right")
+        table.add_column("Behavior", style="bold")
+
+        total_net_flow = 0
+        for wallet, history in wallet_data.items():
+            if len(history) < 2:
+                continue
+
+            label = history[0]["label"]
+            start_balance = history[0]["balance"]
+            end_balance = history[-1]["balance"]
+            net_change = end_balance - start_balance
+            total_net_flow += net_change
+
+            # Count transactions
+            tx_count = sum(1 for h in history if h["tx_type"])
+
+            # Classify behavior
+            if net_change > 0:
+                pct_change = (net_change / start_balance * 100) if start_balance > 0 else 100
+                if pct_change > 10:
+                    behavior = "[green]ACCUMULATING[/green]"
+                else:
+                    behavior = "[green]Slight buy[/green]"
+            elif net_change < 0:
+                pct_change = (abs(net_change) / start_balance * 100) if start_balance > 0 else 100
+                if pct_change > 10:
+                    behavior = "[red]DISTRIBUTING[/red]"
+                else:
+                    behavior = "[red]Slight sell[/red]"
+            else:
+                behavior = "[yellow]HOLDING[/yellow]"
+
+            # Format balances for display
+            decimals = self.config.token_decimals
+            start_fmt = f"{start_balance / 10**decimals:,.0f}"
+            end_fmt = f"{end_balance / 10**decimals:,.0f}"
+            net_fmt = f"{net_change / 10**decimals:+,.0f}"
+
+            table.add_row(label, start_fmt, end_fmt, net_fmt, str(tx_count), behavior)
+
+        console.print(table)
+
+        # Overall summary
+        console.print(f"\n[bold]Overall Market Phase:[/bold]")
+        decimals = self.config.token_decimals
+        if total_net_flow > 0:
+            console.print(f"  [green]ACCUMULATION[/green] - Net inflow: {total_net_flow / 10**decimals:,.0f} tokens")
+        elif total_net_flow < 0:
+            console.print(f"  [red]DISTRIBUTION[/red] - Net outflow: {abs(total_net_flow) / 10**decimals:,.0f} tokens")
+        else:
+            console.print(f"  [yellow]NEUTRAL[/yellow] - No significant net flow")
+
+        # Get trend score history
+        console.print(f"\n[bold]Trend Score History:[/bold]")
+        scores = self.trend_tracker.get_trend_history(days)
+        if scores:
+            bullish_count = sum(1 for s in scores if "BULLISH" in s.signal.value)
+            bearish_count = sum(1 for s in scores if "BEARISH" in s.signal.value)
+            neutral_count = sum(1 for s in scores if s.signal.value == "NEUTRAL")
+            console.print(f"  Bullish signals: {bullish_count}")
+            console.print(f"  Bearish signals: {bearish_count}")
+            console.print(f"  Neutral signals: {neutral_count}")
+
+            avg_score = sum(s.score for s in scores) / len(scores)
+            console.print(f"  Average score: {avg_score:+.1f}")
+        else:
+            console.print("  [dim]No trend scores recorded[/dim]")
+
+        # Data quality assessment
+        console.print(f"\n[bold]Data Quality:[/bold]")
+        total_polls = len(rows)
+        expected_polls = days * 24 * 12 * len(wallet_data)  # 5-min intervals
+        coverage = (total_polls / expected_polls * 100) if expected_polls > 0 else 0
+        console.print(f"  Data coverage: {coverage:.1f}% ({total_polls} of ~{expected_polls} expected polls)")
+
+        if coverage < 50:
+            console.print(f"  [yellow]⚠ Low coverage - results may be unreliable[/yellow]")
+        elif coverage > 80:
+            console.print(f"  [green]✓ Good coverage - results are reliable[/green]")
+
     def send_email_report(self):
-        """Send scheduled email report with trend and whale data."""
+        """Send scheduled email report with trend, whale, and holder data."""
         if not self.email_notifier.is_enabled():
             return
 
         console.print("[cyan]Preparing email report...[/cyan]")
 
-        # Get latest trend score
+        # Get latest trend score and holder data
         trend_score = None
+        holder_summary = None
+        new_whales = []
+        
         if self.trend_tracker:
-            scores = self.trend_tracker.get_trend_history(1)
-            if scores:
-                trend_score = scores[0]
+            # Run full discovery cycle to get all data
+            try:
+                discovery_data = self.trend_tracker.run_full_discovery_cycle(self.wallet_states)
+                trend_score = discovery_data.get("trend_score")
+                holder_summary = discovery_data.get("holder_summary")
+                new_whales = discovery_data.get("unnotified_whales", [])
+                
+                # Mark whales as notified after including in email
+                if new_whales:
+                    whale_addresses = [w.get("address") for w in new_whales if w.get("address")]
+                    self.trend_tracker.mark_whales_notified(whale_addresses)
+                    console.print(f"[green]Found {len(new_whales)} new whale(s) to report[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Discovery cycle error: {e}[/yellow]")
+                # Fallback to basic trend score
+                scores = self.trend_tracker.get_trend_history(1)
+                if scores:
+                    trend_score = scores[0]
 
         # Get recent signals from log
         recent_signals = []
         log_entries = self.logger.read_history(hours=self.config.email.report_interval_hours)
         for entry in log_entries:
             parts = entry.split('|')
-            if len(parts) >= 4 and parts[2] in ["WHALE_BUY", "WHALE_SELL", "WHALE_TO_CEX", "ACCUMULATION", "DISTRIBUTION"]:
+            if len(parts) >= 4 and parts[2] in ["WHALE_BUY", "WHALE_SELL", "WHALE_EXIT", "WHALE_DUMP", "WHALE_TO_CEX", "ACCUMULATION", "DISTRIBUTION"]:
                 recent_signals.append(Signal(
                     signal_type=parts[2],
                     wallet_label=parts[3] if len(parts) > 3 else "",
@@ -1566,11 +1927,13 @@ class RalphWhaleTracker:
                     timestamp=parts[0]
                 ))
 
-        # Send the report
+        # Send the report with all data
         self.email_notifier.send_report(
             wallet_states=self.wallet_states,
             trend_score=trend_score,
-            recent_signals=recent_signals
+            recent_signals=recent_signals,
+            holder_summary=holder_summary,
+            new_whales=new_whales
         )
 
 
@@ -1672,6 +2035,19 @@ Trend signals:
         help='Enable verbose output'
     )
 
+    parser.add_argument(
+        '--passive',
+        action='store_true',
+        help='Passive collection mode: disables instant alerts, only logs data for later analysis'
+    )
+
+    parser.add_argument(
+        '--analyze',
+        type=int,
+        metavar='DAYS',
+        help='Run analysis on collected data for N days'
+    )
+
     args = parser.parse_args()
 
     # Initialize tracker
@@ -1692,11 +2068,14 @@ Trend signals:
         tracker.run_trend_analysis()
     elif args.trend_history:
         tracker.show_trend_history(args.trend_history)
+    elif args.analyze:
+        tracker.run_weekly_analysis(args.analyze)
     elif args.snapshot:
         tracker.run_snapshot()
     else:
         record_trends = not args.no_trend_recording
-        tracker.run_polling(record_trends=record_trends)
+        passive_mode = args.passive
+        tracker.run_polling(record_trends=record_trends, passive_mode=passive_mode)
 
 
 if __name__ == "__main__":
