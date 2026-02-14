@@ -131,8 +131,13 @@ When docs conflict:
 # === PLG ANALYSIS ===
 python plg_batch_analyzer.py                    # Analyze all 33 companies
 python plg_batch_analyzer.py MDB SNOW CRWD      # Analyze specific tickers
+python plg_batch_analyzer.py --check-freshness  # Check data staleness
 python plg_enhanced_analyzer.py                  # With opportunity scoring
 python plg_enhanced_analyzer.py MDB SNOW        # Enhanced for specific tickers
+
+# === PLG DASHBOARD ===
+streamlit run plg_dashboard.py                   # Launch interactive dashboard
+pip install -r requirements_dashboard.txt        # Install dashboard dependencies
 
 # === PLG TESTS ===
 pytest test_plg_core.py -v                      # Run all 59 verdict logic tests
@@ -178,6 +183,7 @@ Each file has a single owner/purpose. When in doubt about where to make a change
 | `company_database.json` | **Company data**: all 33 companies with NDR, growth, assessments, Tier 2/3/4 fields | — |
 | `plg_batch_analyzer.py` | Batch analysis, summary, CSV/JSON output | `plg_core`, `company_database.json`, yfinance |
 | `plg_enhanced_analyzer.py` | Opportunity scoring, valuation overlay, technicals | `plg_core`, `company_database.json`, yfinance |
+| `plg_dashboard.py` | Streamlit interactive dashboard (4 views: overview, deep dive, screening, data quality) | `plg_core`, `plg_enhanced_analyzer`, `company_database.json`, streamlit, plotly |
 | `test_plg_core.py` | 59 tests for verdict logic, confidence, staleness, tier routing | `plg_core`, `company_database.json` |
 | `_archived/plg_prototype.py` | **ARCHIVED** — original single-company test framework | — |
 

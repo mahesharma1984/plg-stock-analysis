@@ -173,6 +173,21 @@ class TrendDatabase:
             )
         """)
 
+        # Discovered whales (auto-detected new large holders)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS discovered_whales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                address TEXT NOT NULL UNIQUE,
+                token_account TEXT,
+                balance INTEGER NOT NULL,
+                pct_supply REAL NOT NULL,
+                rank_when_discovered INTEGER,
+                discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                notified BOOLEAN DEFAULT 0,
+                added_to_tracking BOOLEAN DEFAULT 0
+            )
+        """)
+
         # Create indexes for faster queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wallet_history_wallet ON wallet_history(wallet)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wallet_history_timestamp ON wallet_history(timestamp)")
@@ -385,6 +400,119 @@ class TrendDatabase:
 
         return scores
 
+    def record_discovered_whale(self, address: str, token_account: str, 
+                                 balance: int, pct_supply: float, rank: int) -> bool:
+        """Record a newly discovered whale. Returns True if new, False if already known."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                INSERT INTO discovered_whales 
+                (address, token_account, balance, pct_supply, rank_when_discovered)
+                VALUES (?, ?, ?, ?, ?)
+            """, (address, token_account, balance, pct_supply, rank))
+            conn.commit()
+            conn.close()
+            return True
+        except sqlite3.IntegrityError:
+            # Already exists
+            conn.close()
+            return False
+
+    def get_unnotified_whales(self) -> List[Dict]:
+        """Get discovered whales that haven't been notified yet."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT address, token_account, balance, pct_supply, rank_when_discovered, discovered_at
+            FROM discovered_whales
+            WHERE notified = 0
+            ORDER BY pct_supply DESC
+        """)
+
+        results = cursor.fetchall()
+        conn.close()
+
+        whales = []
+        for row in results:
+            whales.append({
+                "address": row[0],
+                "token_account": row[1],
+                "balance": row[2],
+                "pct_supply": row[3],
+                "rank": row[4],
+                "discovered_at": row[5]
+            })
+        return whales
+
+    def mark_whales_notified(self, addresses: List[str]):
+        """Mark discovered whales as notified."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        for addr in addresses:
+            cursor.execute("""
+                UPDATE discovered_whales SET notified = 1 WHERE address = ?
+            """, (addr,))
+
+        conn.commit()
+        conn.close()
+
+    def get_all_discovered_whales(self) -> List[Dict]:
+        """Get all discovered whales."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT address, token_account, balance, pct_supply, rank_when_discovered, 
+                   discovered_at, notified, added_to_tracking
+            FROM discovered_whales
+            ORDER BY pct_supply DESC
+        """)
+
+        results = cursor.fetchall()
+        conn.close()
+
+        whales = []
+        for row in results:
+            whales.append({
+                "address": row[0],
+                "token_account": row[1],
+                "balance": row[2],
+                "pct_supply": row[3],
+                "rank": row[4],
+                "discovered_at": row[5],
+                "notified": row[6],
+                "added_to_tracking": row[7]
+            })
+        return whales
+
+    def get_latest_holder_snapshot(self) -> Optional[Dict]:
+        """Get the most recent holder snapshot."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT holder_count, top_10_pct, top_50_pct, timestamp
+            FROM holder_snapshots
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """)
+
+        result = cursor.fetchone()
+        conn.close()
+
+        if result:
+            return {
+                "holder_count": result[0],
+                "top_10_pct": result[1],
+                "top_50_pct": result[2],
+                "timestamp": result[3]
+            }
+        return None
+
 
 # ============================================================
 # DEX DATA FETCHER (Birdeye/Jupiter APIs)
@@ -474,19 +602,136 @@ class DEXDataFetcher:
 
 
 # ============================================================
-# HOLDER COUNT TRACKER (Solana RPC)
+# HELIUS API CLIENT (Enhanced Data)
 # ============================================================
 
-class HolderTracker:
-    """Tracks token holder count via Solana RPC."""
+class HeliusClient:
+    """Client for Helius API - enhanced Solana data."""
 
     def __init__(self, rpc_url: str, token_address: str):
         self.rpc_url = rpc_url
         self.token_address = token_address
         self.session = requests.Session()
+        
+        # Extract API key from RPC URL for DAS API calls
+        self.api_key = ""
+        if "api-key=" in rpc_url:
+            self.api_key = rpc_url.split("api-key=")[-1].split("&")[0]
+        
+        # Helius DAS API base URL
+        self.das_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}" if self.api_key else rpc_url
 
-    def get_token_largest_accounts(self, limit: int = 20) -> Optional[List[Dict]]:
-        """Get largest token accounts."""
+    def get_token_holders(self) -> Optional[Dict]:
+        """Get token holder count and distribution using Helius DAS API."""
+        if not self.api_key:
+            return None
+            
+        try:
+            # Use getAsset to get token metadata including holder info
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "helius-holders",
+                "method": "getAsset",
+                "params": {
+                    "id": self.token_address,
+                    "displayOptions": {
+                        "showFungible": True
+                    }
+                }
+            }
+
+            response = self.session.post(
+                self.das_url,
+                json=payload,
+                timeout=30,
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "result" in result:
+                return result["result"]
+            return None
+
+        except Exception as e:
+            console.print(f"[dim]Helius getAsset: {e}[/dim]")
+            return None
+
+    def get_token_accounts(self, limit: int = 50, cursor: str = None) -> Optional[Dict]:
+        """Get token accounts (holders) using Helius searchAssets."""
+        if not self.api_key:
+            return None
+            
+        try:
+            params = {
+                "grouping": ["collection", self.token_address],
+                "limit": limit,
+                "displayOptions": {
+                    "showFungible": True
+                }
+            }
+            if cursor:
+                params["cursor"] = cursor
+                
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "helius-accounts",
+                "method": "searchAssets",
+                "params": params
+            }
+
+            response = self.session.post(
+                self.das_url,
+                json=payload,
+                timeout=30,
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "result" in result:
+                return result["result"]
+            return None
+
+        except Exception as e:
+            console.print(f"[dim]Helius searchAssets: {e}[/dim]")
+            return None
+
+    def get_signatures_for_asset(self, limit: int = 100) -> Optional[List[Dict]]:
+        """Get recent transaction signatures for the token."""
+        if not self.api_key:
+            return None
+            
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "helius-sigs",
+                "method": "getSignaturesForAsset",
+                "params": {
+                    "id": self.token_address,
+                    "limit": limit
+                }
+            }
+
+            response = self.session.post(
+                self.das_url,
+                json=payload,
+                timeout=30,
+                headers={"Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "result" in result and "items" in result["result"]:
+                return result["result"]["items"]
+            return None
+
+        except Exception as e:
+            console.print(f"[dim]Helius getSignaturesForAsset: {e}[/dim]")
+            return None
+
+    def get_top_holders_via_rpc(self, limit: int = 20) -> Optional[List[Dict]]:
+        """Get largest token accounts via standard RPC (fallback)."""
         try:
             payload = {
                 "jsonrpc": "2.0",
@@ -511,6 +756,185 @@ class HolderTracker:
             console.print(f"[yellow]RPC error getting largest accounts: {e}[/yellow]")
             return None
 
+    def get_account_info(self, address: str) -> Optional[Dict]:
+        """Get account info for a specific address."""
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getAccountInfo",
+                "params": [
+                    address,
+                    {"encoding": "jsonParsed"}
+                ]
+            }
+
+            response = self.session.post(
+                self.rpc_url,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            if "result" in result and result["result"]:
+                return result["result"]["value"]
+            return None
+
+        except Exception as e:
+            return None
+
+    def resolve_token_account_owner(self, token_account_address: str) -> Optional[str]:
+        """Resolve a token account address to its owner wallet address."""
+        account_info = self.get_account_info(token_account_address)
+        if account_info:
+            try:
+                parsed = account_info.get("data", {}).get("parsed", {})
+                info = parsed.get("info", {})
+                return info.get("owner")
+            except (KeyError, TypeError):
+                pass
+        return None
+
+
+# ============================================================
+# HOLDER COUNT TRACKER (Enhanced with Helius)
+# ============================================================
+
+class HolderTracker:
+    """Tracks token holder count and discovers new whales."""
+
+    def __init__(self, rpc_url: str, token_address: str, token_decimals: int = 9):
+        self.rpc_url = rpc_url
+        self.token_address = token_address
+        self.token_decimals = token_decimals
+        self.session = requests.Session()
+        self.helius = HeliusClient(rpc_url, token_address)
+        self.known_whales: set = set()  # Track known whale addresses
+        self.last_top_holders: List[Dict] = []  # Store last known top holders
+
+    def get_token_largest_accounts(self, limit: int = 20) -> Optional[List[Dict]]:
+        """Get largest token accounts."""
+        return self.helius.get_top_holders_via_rpc(limit)
+
+    def get_holder_count_estimate(self) -> int:
+        """
+        Estimate holder count by checking token supply info.
+        Note: Exact holder count requires indexing all accounts.
+        """
+        try:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getTokenSupply",
+                "params": [self.token_address]
+            }
+
+            response = self.session.post(
+                self.rpc_url,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            # Token supply doesn't give holder count, but we can track accounts
+            # For now, return 0 and rely on other methods
+            return 0
+
+        except Exception:
+            return 0
+
+    def discover_new_whales(self, tracked_addresses: set, min_balance_pct: float = 1.0, 
+                           total_supply: int = 1_000_000_000) -> List[Dict]:
+        """
+        Discover new whale wallets that aren't being tracked.
+        
+        Returns list of new whales with their details.
+        """
+        new_whales = []
+        
+        # Get top holders
+        top_holders = self.get_token_largest_accounts(limit=30)
+        if not top_holders:
+            return new_whales
+
+        min_balance = int(min_balance_pct / 100 * total_supply * (10 ** self.token_decimals))
+        
+        for i, holder in enumerate(top_holders):
+            try:
+                token_account = holder.get("address", "")
+                amount = int(holder.get("amount", 0))
+                
+                # Skip if below threshold
+                if amount < min_balance:
+                    continue
+                
+                # Resolve to owner wallet
+                owner = self.helius.resolve_token_account_owner(token_account)
+                if not owner:
+                    continue
+                
+                # Check if already tracked
+                if owner in tracked_addresses:
+                    continue
+                
+                # Calculate percentage
+                pct_supply = (amount / (10 ** self.token_decimals)) / total_supply * 100
+                
+                # Format balance
+                balance_display = amount / (10 ** self.token_decimals)
+                if balance_display >= 1_000_000:
+                    balance_str = f"{balance_display/1_000_000:.1f}M"
+                elif balance_display >= 1_000:
+                    balance_str = f"{balance_display/1_000:.1f}K"
+                else:
+                    balance_str = f"{balance_display:.0f}"
+                
+                new_whales.append({
+                    "rank": i + 1,
+                    "address": owner,
+                    "token_account": token_account,
+                    "balance": amount,
+                    "balance_display": balance_str,
+                    "pct_supply": pct_supply,
+                    "suggested_label": f"new_whale_{i+1}"
+                })
+                
+            except (KeyError, ValueError, TypeError):
+                continue
+        
+        return new_whales
+
+    def get_top_holders_with_owners(self, limit: int = 20) -> List[Dict]:
+        """Get top holders with resolved owner addresses."""
+        holders = []
+        top_accounts = self.get_token_largest_accounts(limit)
+        
+        if not top_accounts:
+            return holders
+            
+        for i, account in enumerate(top_accounts):
+            try:
+                token_account = account.get("address", "")
+                amount = int(account.get("amount", 0))
+                
+                # Resolve owner
+                owner = self.helius.resolve_token_account_owner(token_account)
+                
+                holders.append({
+                    "rank": i + 1,
+                    "token_account": token_account,
+                    "owner": owner or "unknown",
+                    "balance": amount,
+                    "decimals": account.get("decimals", self.token_decimals)
+                })
+            except (KeyError, ValueError):
+                continue
+        
+        self.last_top_holders = holders
+        return holders
+
     def calculate_concentration(self, accounts: List[Dict], total_supply: int) -> Tuple[float, float]:
         """Calculate top 10 and top 50 holder concentration."""
         if not accounts:
@@ -519,12 +943,48 @@ class HolderTracker:
         amounts = [int(acc.get("amount", 0)) for acc in accounts]
 
         top_10_total = sum(amounts[:10])
-        top_50_total = sum(amounts[:50])
+        top_50_total = sum(amounts[:min(50, len(amounts))])
 
         top_10_pct = (top_10_total / total_supply * 100) if total_supply > 0 else 0.0
         top_50_pct = (top_50_total / total_supply * 100) if total_supply > 0 else 0.0
 
         return top_10_pct, top_50_pct
+
+    def detect_holder_changes(self, previous_holders: List[Dict], 
+                              current_holders: List[Dict]) -> Dict:
+        """Detect changes in top holder rankings."""
+        changes = {
+            "new_entries": [],      # New addresses in top holders
+            "exits": [],            # Addresses that left top holders  
+            "rank_changes": [],     # Significant rank movements
+            "balance_changes": []   # Large balance changes
+        }
+        
+        if not previous_holders or not current_holders:
+            return changes
+            
+        prev_owners = {h.get("owner", h.get("address")): h for h in previous_holders}
+        curr_owners = {h.get("owner", h.get("address")): h for h in current_holders}
+        
+        # Find new entries
+        for owner, data in curr_owners.items():
+            if owner not in prev_owners and owner != "unknown":
+                changes["new_entries"].append({
+                    "owner": owner,
+                    "rank": data.get("rank"),
+                    "balance": data.get("balance")
+                })
+        
+        # Find exits
+        for owner, data in prev_owners.items():
+            if owner not in curr_owners and owner != "unknown":
+                changes["exits"].append({
+                    "owner": owner,
+                    "previous_rank": data.get("rank"),
+                    "balance": data.get("balance")
+                })
+        
+        return changes
 
 
 # ============================================================
@@ -1012,11 +1472,15 @@ class TrendTracker:
 
         # Initialize components
         self.dex_fetcher = DEXDataFetcher(self.token_address)
-        self.holder_tracker = HolderTracker(self.rpc_url, self.token_address)
+        self.holder_tracker = HolderTracker(self.rpc_url, self.token_address, self.token_decimals)
         self.analyzer = TrendAnalyzer(self.db, self.token_decimals, self.total_supply)
 
         # Store wallet info
         self.wallets = {w["address"]: w for w in config.get("wallets", [])}
+        
+        # Track last holder data for comparison
+        self.last_holder_count = 0
+        self.last_top_10_pct = 0.0
 
     def record_snapshot(self, wallet_states: Dict):
         """Record current wallet states to trend database."""
@@ -1138,6 +1602,105 @@ class TrendTracker:
     def get_trend_history(self, days: int = 7) -> List[TrendScore]:
         """Get historical trend scores."""
         return self.db.get_trend_score_history(days)
+
+    def discover_new_whales(self, tracked_addresses: set = None) -> List[Dict]:
+        """
+        Discover new whale wallets that aren't being tracked.
+        Records them in the database and returns newly discovered ones.
+        """
+        if tracked_addresses is None:
+            tracked_addresses = set(self.wallets.keys())
+        
+        new_whales = self.holder_tracker.discover_new_whales(
+            tracked_addresses=tracked_addresses,
+            min_balance_pct=1.0,  # Whales with >= 1% supply
+            total_supply=self.total_supply
+        )
+        
+        newly_discovered = []
+        for whale in new_whales:
+            is_new = self.db.record_discovered_whale(
+                address=whale["address"],
+                token_account=whale["token_account"],
+                balance=whale["balance"],
+                pct_supply=whale["pct_supply"],
+                rank=whale["rank"]
+            )
+            if is_new:
+                newly_discovered.append(whale)
+                console.print(f"[green]🐋 New whale discovered: {whale['address'][:8]}... "
+                             f"({whale['balance_display']} RALPH, {whale['pct_supply']:.2f}%)[/green]")
+        
+        return newly_discovered
+
+    def get_unnotified_whales(self) -> List[Dict]:
+        """Get discovered whales that haven't been emailed yet."""
+        return self.db.get_unnotified_whales()
+
+    def mark_whales_notified(self, addresses: List[str]):
+        """Mark whales as notified after sending email."""
+        self.db.mark_whales_notified(addresses)
+
+    def get_holder_summary(self) -> Dict:
+        """Get comprehensive holder summary for reports."""
+        # Get concentration data
+        top_holders = self.holder_tracker.get_token_largest_accounts(limit=20)
+        
+        if top_holders:
+            total_raw = self.total_supply * (10 ** self.token_decimals)
+            top_10_pct, top_50_pct = self.holder_tracker.calculate_concentration(
+                top_holders, total_raw
+            )
+            
+            # Record to database
+            # Note: We don't have exact holder count without indexing all accounts
+            # Using 0 as placeholder, trends will show change over time
+            self.db.record_holder_count(0, top_10_pct, top_50_pct)
+        else:
+            top_10_pct, top_50_pct = 0.0, 0.0
+        
+        # Get historical data for trend
+        holder_trend = self.analyzer.analyze_holder_trend()
+        
+        # Get latest snapshot
+        latest = self.db.get_latest_holder_snapshot()
+        
+        return {
+            "top_10_concentration": top_10_pct,
+            "top_50_concentration": top_50_pct,
+            "trend": holder_trend,
+            "latest_snapshot": latest,
+            "top_holders": top_holders[:10] if top_holders else []
+        }
+
+    def run_full_discovery_cycle(self, wallet_states: Dict) -> Dict:
+        """
+        Run a full discovery and analysis cycle.
+        Returns summary data for email reports.
+        """
+        # Get tracked addresses
+        tracked = set(wallet_states.keys())
+        
+        # Discover new whales
+        new_whales = self.discover_new_whales(tracked)
+        
+        # Get holder summary
+        holder_summary = self.get_holder_summary()
+        
+        # Get unnotified whales (including any from previous runs)
+        unnotified = self.get_unnotified_whales()
+        
+        # Run trend analysis
+        score, whale_metrics, market_metrics = self.run_analysis(wallet_states)
+        
+        return {
+            "new_whales": new_whales,
+            "unnotified_whales": unnotified,
+            "holder_summary": holder_summary,
+            "trend_score": score,
+            "whale_metrics": whale_metrics,
+            "market_metrics": market_metrics
+        }
 
 
 # ============================================================

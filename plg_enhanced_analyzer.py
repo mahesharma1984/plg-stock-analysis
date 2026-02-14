@@ -28,6 +28,7 @@ from plg_core import (
     VerdictResult,
     load_company_database,
     build_company_data,
+    fetch_sec_edgar_data,
     compute_verdict,
     format_verdict,
     format_growth,
@@ -440,10 +441,11 @@ def analyze_company_enhanced(ticker: str, company_info: dict) -> dict:
     price_data = fetch_enhanced_price_data(ticker)
 
     # Build CompanyData and compute fundamental verdict via plg_core
+    sec_data = fetch_sec_edgar_data(ticker, company_info.get('cik', ''))
     yf_data = {
         'current_price': price_data.current_price,
     }
-    company = build_company_data(ticker, company_info, yf_data)
+    company = build_company_data(ticker, company_info, yf_data, sec_data)
     verdict_result = compute_verdict(company)
 
     fundamental_verdict = verdict_result.verdict

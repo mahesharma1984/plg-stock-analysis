@@ -683,3 +683,68 @@ class TestRegression:
 
             assert verdict.verdict == verdict2.verdict, \
                 f"{ticker}: batch={verdict.verdict} vs enhanced={verdict2.verdict}"
+
+
+# ============================================================
+# REVENUE GROWTH FALLBACK (3 tests)
+# ============================================================
+
+class TestRevenueGrowthFallback:
+
+    def test_zero_growth_preserved(self):
+        """revenue_growth_yoy=0.0 is valid data, should NOT fall through to yfinance."""
+        info = {'name': 'Test', 'revenue_growth_yoy': 0.0}
+        yf_data = {'revenue_growth_yoy': 0.25}
+        company = build_company_data('TEST', info, yf_data)
+        assert company.revenue_growth_yoy == 0.0
+
+    def test_none_falls_through_to_yfinance(self):
+        """revenue_growth_yoy=None should fall through to yfinance value."""
+        info = {'name': 'Test', 'revenue_growth_yoy': None}
+        yf_data = {'revenue_growth_yoy': 0.30}
+        company = build_company_data('TEST', info, yf_data)
+        assert company.revenue_growth_yoy == 0.30
+
+    def test_missing_key_falls_through(self):
+        """No revenue_growth_yoy key at all should fall through to yfinance."""
+        info = {'name': 'Test'}
+        yf_data = {'revenue_growth_yoy': 0.15}
+        company = build_company_data('TEST', info, yf_data)
+        assert company.revenue_growth_yoy == 0.15
+
+
+# ============================================================
+# SEC EDGAR INTEGRATION (2 tests)
+# ============================================================
+
+class TestSecEdgarIntegration:
+
+    def test_sec_data_revenue_fallback(self):
+        """SEC EDGAR latest_revenue used when yfinance revenue_ttm is missing."""
+        info = {'name': 'Test'}
+        yf_data = {}  # No revenue from yfinance
+        sec_data = {'latest_revenue': 500_000_000, 'latest_period': '2025-12-31'}
+        company = build_company_data('TEST', info, yf_data, sec_data)
+        assert company.revenue_ttm == 500_000_000
+
+    def test_yfinance_revenue_preferred_over_sec(self):
+        """yfinance revenue_ttm takes priority over SEC EDGAR."""
+        info = {'name': 'Test'}
+        yf_data = {'revenue_ttm': 1_000_000_000}
+        sec_data = {'latest_revenue': 500_000_000}
+        company = build_company_data('TEST', info, yf_data, sec_data)
+        assert company.revenue_ttm == 1_000_000_000
+
+
+# ============================================================
+# DATA_UPDATED BASELINE (1 test)
+# ============================================================
+
+class TestDataUpdatedBaseline:
+
+    def test_all_companies_have_data_updated(self):
+        """Every company in the database should have a data_updated date set."""
+        database = load_company_database()
+        for ticker, info in database.items():
+            assert info.get('data_updated') is not None, \
+                f"{ticker} is missing data_updated date"

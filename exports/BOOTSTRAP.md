@@ -2,6 +2,35 @@
 
 This guide walks you through applying the Development Methodology Kit to a new project.
 
+**Important:** Start with theory, not templates. The documentation structure is only useful if you understand the principles behind it.
+
+---
+
+## Step 0: Read the Knowledge Base (1-2 hours)
+
+Before setting up anything, read the theoretical foundations. These are the mental models that make the skills and templates make sense.
+
+### Minimum Reading (30 minutes)
+
+If you're short on time, read these two — they cover the most critical concepts:
+
+1. **[LLM Capability Model](knowledge-base/llm-capability-model.md)** — Understand what AI can and cannot do. This prevents the #1 failure mode in AI-assisted systems.
+2. **[Task Design Theory](knowledge-base/task-design-theory.md)** — Understand how to decompose work correctly. This prevents building the wrong thing.
+
+### Recommended Reading (1 hour)
+
+Add these based on what you're building:
+
+3. **[Causality & Systems](knowledge-base/causality-and-systems.md)** — If your project has multiple stages or components that depend on each other.
+4. **[Measurement Theory](knowledge-base/measurement-theory.md)** — If you need to track quality over time or across cases.
+5. **[Failure Theory](knowledge-base/failure-theory.md)** — If your system processes data through a pipeline where errors can compound.
+
+### Full Reading (2 hours)
+
+Read all five in order. Each builds on the previous.
+
+**Why this matters:** The skills (Step 1) are procedures that implement these theories. Without the theory, you'll follow the procedures mechanically and won't recognize when to adapt them to your specific situation. With the theory, the procedures become obvious consequences of the mental models.
+
 ---
 
 ## Step 1: Choose Your Skills (5 minutes)
@@ -127,12 +156,21 @@ Add to CLAUDE.md § 3:
 
 ---
 
-## Step 4: Copy Skills Reference (Optional, 5 minutes)
+## Step 4: Copy Knowledge Base and Skills Reference (Optional, 5 minutes)
 
-If you want the full skill documents in your repo for reference:
+If you want the theory and skill documents in your repo for reference:
 
 ```bash
-mkdir -p docs/methodology
+mkdir -p docs/knowledge-base docs/methodology
+
+# Layer 0: Theory (recommended — these are the foundation)
+cp exports/knowledge-base/llm-capability-model.md ./docs/knowledge-base/
+cp exports/knowledge-base/task-design-theory.md ./docs/knowledge-base/
+cp exports/knowledge-base/causality-and-systems.md ./docs/knowledge-base/
+cp exports/knowledge-base/measurement-theory.md ./docs/knowledge-base/
+cp exports/knowledge-base/failure-theory.md ./docs/knowledge-base/
+
+# Layer 1: Skills
 cp exports/skills/rp-split.md ./docs/methodology/
 cp exports/skills/pattern-first.md ./docs/methodology/
 cp exports/skills/measurement-driven.md ./docs/methodology/
@@ -140,7 +178,7 @@ cp exports/skills/failure-gates.md ./docs/methodology/
 cp exports/skills/prototype-building.md ./docs/methodology/
 ```
 
-Then reference them from your CLAUDE.md work modes section.
+Then reference them from your CLAUDE.md work modes section. The knowledge base documents are especially valuable for onboarding new team members — they explain *why* the practices exist, not just *what* to do.
 
 ---
 
@@ -202,6 +240,7 @@ The goal is that **every lesson learned is captured** so it doesn't have to be r
 - [ ] `docs/WORKFLOW_REGISTRY.md` — Named procedures
 - [ ] `docs/architecture/SYSTEM_ARCHITECTURE.md` — System design
 - [ ] `docs/CHANGELOG.md` — Change history
+- [ ] `docs/knowledge-base/*.md` — Theoretical foundations (recommended)
 - [ ] `docs/methodology/*.md` — Adopted skills (optional)
 
 ---

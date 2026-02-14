@@ -1280,12 +1280,13 @@ def save_company_database(db: Dict[str, dict], path: str = None) -> None:
         json.dump(db, f, indent=2)
 
 
-def build_company_data(ticker: str, info: dict, yf_data: dict = None) -> CompanyData:
-    """Build a CompanyData from database info dict + optional yfinance data.
+def build_company_data(ticker: str, info: dict, yf_data: dict = None, sec_data: dict = None) -> CompanyData:
+    """Build a CompanyData from database info dict + optional yfinance/SEC EDGAR data.
 
     Merges manual data from company_database.json with live API data.
     """
     yf_data = yf_data or {}
+    sec_data = sec_data or {}
 
     return CompanyData(
         ticker=ticker,
@@ -1294,10 +1295,10 @@ def build_company_data(ticker: str, info: dict, yf_data: dict = None) -> Company
         category=info.get('category', 'unknown'),
         business_model=info.get('business_model', 'b2b_saas'),
 
-        # Automated (prefer yfinance, fall back to database)
+        # Automated (prefer yfinance, fall back to SEC EDGAR, then database)
         market_cap=yf_data.get('market_cap'),
-        revenue_ttm=yf_data.get('revenue_ttm'),
-        revenue_growth_yoy=info.get('revenue_growth_yoy') or yf_data.get('revenue_growth_yoy'),
+        revenue_ttm=yf_data.get('revenue_ttm') or sec_data.get('latest_revenue'),
+        revenue_growth_yoy=info.get('revenue_growth_yoy') if info.get('revenue_growth_yoy') is not None else yf_data.get('revenue_growth_yoy'),
         gross_margin=yf_data.get('gross_margin'),
         operating_margin=yf_data.get('operating_margin'),
         current_price=yf_data.get('current_price'),
